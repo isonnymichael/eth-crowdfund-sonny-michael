@@ -15,7 +15,8 @@ contract CrowdFund {
         Active,
         Successful,
         Failed,
-        Claimed
+        Claimed,
+        Cancelled
     }
 
     struct Campaign {
@@ -29,6 +30,7 @@ contract CrowdFund {
         uint256 createdAt;
         CampaignStatus status;
         uint256 contributorCount;
+        bool isExtended;
     }
 
     // ============================================
@@ -44,6 +46,7 @@ contract CrowdFund {
     mapping(uint256 => Campaign) public campaigns;
     mapping(uint256 => mapping(address => uint256)) public contributions;
     mapping(uint256 => mapping(address => bool)) public hasContributed;
+    mapping(uint256 => mapping(address => bool)) public isEarlyBird;
     mapping(address => uint256[]) public creatorCampaigns;
 
     // ============================================
@@ -78,6 +81,12 @@ contract CrowdFund {
         uint256 indexed campaignId,
         uint256 totalRaised,
         uint256 goalAmount
+    );
+    event CampaignCancelled(uint256 indexed campaignId);
+    event DeadlineExtended(uint256 indexed campaignId, uint256 newDeadline);
+    event EarlyBirdContribution(
+        uint256 indexed campaignId,
+        address indexed contributor
     );
 
     // ============================================
@@ -150,7 +159,8 @@ contract CrowdFund {
             deadline: deadline,
             createdAt: block.timestamp,
             status: CampaignStatus.Active,
-            contributorCount: 0
+            contributorCount: 0,
+            isExtended: false
         });
 
         creatorCampaigns[msg.sender].push(campaignCounter);
@@ -181,6 +191,14 @@ contract CrowdFund {
         contributions[_campaignId][msg.sender] += msg.value;
         campaign.currentAmount += msg.value;
 
+        // Idea 5: Early Bird Bonus tracking (within first 24 hours)
+        if (block.timestamp <= campaign.createdAt + 1 days) {
+            if (!isEarlyBird[_campaignId][msg.sender]) {
+                isEarlyBird[_campaignId][msg.sender] = true;
+                emit EarlyBirdContribution(_campaignId, msg.sender);
+            }
+        }
+
         emit ContributionMade(
             _campaignId,
             msg.sender,
@@ -206,27 +224,28 @@ contract CrowdFund {
         uint256 amount = campaign.currentAmount;
         campaign.status = CampaignStatus.Claimed;
 
+        emit FundsClaimed(_campaignId, msg.sender, amount);
+
         (bool success, ) = payable(msg.sender).call{value: amount}("");
         require(success, "Transfer failed");
-
-        emit FundsClaimed(_campaignId, msg.sender, amount);
     }
 
     /// @notice Kontributor refund jika campaign gagal
     /// @param _campaignId ID campaign
     function refund(uint256 _campaignId) public onlyContributor(_campaignId) {
+        CampaignStatus status = campaigns[_campaignId].status;
         require(
-            campaigns[_campaignId].status == CampaignStatus.Failed,
+            status == CampaignStatus.Failed || status == CampaignStatus.Cancelled,
             "Refund not available"
         );
         uint256 amount = contributions[_campaignId][msg.sender];
 
         contributions[_campaignId][msg.sender] = 0;
 
+        emit RefundIssued(_campaignId, msg.sender, amount);
+
         (bool success, ) = payable(msg.sender).call{value: amount}("");
         require(success, "Transfer failed");
-
-        emit RefundIssued(_campaignId, msg.sender, amount);
     }
 
     /// @notice Cek dan update status campaign
@@ -285,5 +304,32 @@ contract CrowdFund {
     /// @notice Lihat saldo contract
     function getContractBalance() public view returns (uint256) {
         return address(this).balance;
+    }
+
+    // ============================================
+    // ADDITIONAL FEATURES
+    // ============================================
+
+    /// @notice Idea 3: Batalkan campaign (hanya creator)
+    function cancelCampaign(
+        uint256 _campaignId
+    ) public onlyCreator(_campaignId) isActive(_campaignId) {
+        campaigns[_campaignId].status = CampaignStatus.Cancelled;
+        emit CampaignCancelled(_campaignId);
+    }
+
+    /// @notice Idea 7: Perpanjang deadline (hanya creator, sekali, max 7 hari)
+    function extendDeadline(
+        uint256 _campaignId,
+        uint256 _additionalDays
+    ) public onlyCreator(_campaignId) isActive(_campaignId) {
+        Campaign storage campaign = campaigns[_campaignId];
+        require(!campaign.isExtended, "Already extended once");
+        require(_additionalDays <= 7, "Max extension is 7 days");
+
+        campaign.deadline += (_additionalDays * 1 days);
+        campaign.isExtended = true;
+
+        emit DeadlineExtended(_campaignId, campaign.deadline);
     }
 }
